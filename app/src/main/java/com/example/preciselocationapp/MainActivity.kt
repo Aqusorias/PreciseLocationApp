@@ -34,6 +34,37 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
+
+private fun applyMarkdown(text: String): AnnotatedString = buildAnnotatedString {
+    var lastEnd = 0
+    val patterns = listOf(
+        Regex("\\*\\*\\*(.*?)\\*\\*\\*") to SpanStyle(fontWeight = FontWeight.Bold, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic),
+        Regex("\\*\\*(.*?)\\*\\*") to SpanStyle(fontWeight = FontWeight.Bold),
+        Regex("\\*(.*?)\\*") to SpanStyle(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic),
+        Regex("_(.*?)_") to SpanStyle(textDecoration = TextDecoration.Underline)
+    )
+
+    val matches = patterns.flatMap { (regex, style) ->
+        regex.findAll(text).map { it to style }
+    }.sortedBy { (match, _) -> match.range.first }
+
+    for ((match, style) in matches) {
+        val start = match.range.first
+        val end = match.range.last
+        if (start >= lastEnd) {
+            if (start > lastEnd) append(text.substring(lastEnd, start))
+            withStyle(style) { append(match.groupValues[1]) }
+            lastEnd = end + 1
+        }
+    }
+    if (lastEnd < text.length) append(text.substring(lastEnd))
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var locationManager: LocationManager
@@ -49,7 +80,16 @@ class MainActivity : ComponentActivity() {
         if (fine || coarse) {
             checkLocationSettings()
         } else {
-            uiState.value = UiState.Error("Location permission denied. App needs location to work.")
+            val fineRationale = ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            val coarseRationale = ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+
+            val permanentlyDenied = !fineRationale && !coarseRationale
+
+            if (permanentlyDenied) {
+                uiState.value = UiState.ErrorNeedsSettings("Location permission *permanently* denied. Please open app settings and allow **precise** location.")
+            } else {
+                uiState.value = UiState.Error("Location permission denied. App needs location to work.")
+            }
         }
     }
 
@@ -73,7 +113,8 @@ class MainActivity : ComponentActivity() {
                 uiState.value,
                 intervalMs = _intervalMs,
                 onIntervalChanged = ::updateInterval,
-                onRetry = { checkPermissionsAndStart() } // retry callback
+                onRetry = { checkPermissionsAndStart() }, // retry callback
+                onOpenSettings = { openAppSettings() }
             )
         }
 
@@ -104,6 +145,13 @@ class MainActivity : ComponentActivity() {
                 )
             )
         }
+    }
+
+    private fun openAppSettings() {
+        val intent = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = android.net.Uri.fromParts("package", packageName, null)
+        }
+        startActivity(intent)
     }
 
     @SuppressLint("MissingPermission")
@@ -144,8 +192,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (uiState.value is UiState.Ready && hasLocationPermission()) {
-            checkLocationSettings()
+
+        if (hasLocationPermission()) {
+            if (uiState.value !is UiState.Ready) {
+                checkLocationSettings()
+            }
         }
     }
 
@@ -157,19 +208,16 @@ class MainActivity : ComponentActivity() {
 
 // ---------- 💞 UI COMPOSABLE 💞 ---------- //
 @Composable
-fun AppContent(state: UiState, intervalMs: Long, onIntervalChanged: (Long) -> Unit, onRetry: () -> Unit) {
+fun AppContent(state: UiState, intervalMs: Long, onIntervalChanged: (Long) -> Unit, onRetry: () -> Unit, onOpenSettings: (() -> Unit)? = null) {
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
             when (state) {
                 is UiState.Loading -> LoadingScreen()
                 is UiState.RequestingPermissions -> LoadingScreen(title = "Requesting Permissions...", subtitle = "Please grant location access to continue.")
                 is UiState.RequestingLocationSettings -> LoadingScreen(title = "Checking Location Settings...", subtitle = "Ensuring GPS and location services are enabled.")
-                is UiState.Ready -> MainScreen(
-                    locationData = state.locationData,
-                    intervalMs = intervalMs,
-                    onIntervalChanged = onIntervalChanged
-                )
+                is UiState.Ready -> MainScreen(locationData = state.locationData, intervalMs = intervalMs, onIntervalChanged = onIntervalChanged)
                 is UiState.Error -> ErrorScreen(message = state.message, onRetry = onRetry)
+                is UiState.ErrorNeedsSettings -> ErrorScreen(message = state.message, onRetry = onRetry, onOpenSettings = onOpenSettings)
             }
         }
     }
@@ -181,7 +229,6 @@ fun LoadingScreen(
     title: String = "Loading...",
     subtitle: String = "Please wait..."
 ) {
-    // Container for the upper third of the screen
     Box(
         modifier = Modifier
             .fillMaxHeight(1f / 3)
@@ -226,7 +273,7 @@ fun MainScreen(locationData: LocationData?, intervalMs: Long, onIntervalChanged:
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(16.dp),
+                .padding(16.dp, top = 128.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Top),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -268,7 +315,9 @@ fun MainScreen(locationData: LocationData?, intervalMs: Long, onIntervalChanged:
 
 // Error screen
 @Composable
-fun ErrorScreen(message: String, onRetry: () -> Unit) {
+fun ErrorScreen(message: String, onRetry: () -> Unit, onOpenSettings: (() -> Unit)? = null) {
+    val formattedMessage = applyMarkdown(message)
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -283,17 +332,23 @@ fun ErrorScreen(message: String, onRetry: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
-            text = message,
+            text = formattedMessage,
             textAlign = TextAlign.Center,
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurface
         )
         Spacer(modifier = Modifier.height(24.dp))
-        Button(
-            onClick = onRetry,
-            modifier = Modifier.padding(top = 16.dp)
-        ) {
-            Text("Retry Permission Request")
+        if (onOpenSettings == null) {
+            Button(
+                onClick = onRetry,
+                modifier = Modifier.padding(top = 16.dp)
+            ) {
+                Text("Retry Permission Request")
+            }
+        } else {
+            Button(onClick = onOpenSettings) {
+                Text("Open Settings")
+            }
         }
     }
 }

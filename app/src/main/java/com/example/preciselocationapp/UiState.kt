@@ -8,4 +8,5 @@ sealed class UiState {
 
     data class Ready(val locationData: LocationData?): UiState() // Main UI ready
     data class Error(val message: String): UiState() // Any failure
+    data class ErrorNeedsSettings(val message: String): UiState()
 }
