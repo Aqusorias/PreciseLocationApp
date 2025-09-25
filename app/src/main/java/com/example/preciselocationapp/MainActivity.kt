@@ -40,8 +40,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
-
 private fun applyMarkdown(text: String): AnnotatedString = buildAnnotatedString {
+    // supports: **bold**, *italic*, _underline_
     var lastEnd = 0
     val patterns = listOf(
         Regex("\\*\\*\\*(.*?)\\*\\*\\*") to SpanStyle(fontWeight = FontWeight.Bold, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic),
@@ -69,6 +69,7 @@ private fun applyMarkdown(text: String): AnnotatedString = buildAnnotatedString 
 class MainActivity : ComponentActivity() {
     private lateinit var locationManager: LocationManager
     private var _intervalMs by mutableLongStateOf(1000L)
+    private var isTrackingEnabled by mutableStateOf(true)
 
     private val uiState = mutableStateOf<UiState>(UiState.Loading)
 
@@ -114,14 +115,15 @@ class MainActivity : ComponentActivity() {
                 intervalMs = _intervalMs,
                 onIntervalChanged = ::updateInterval,
                 onRetry = { checkPermissionsAndStart() }, // retry callback
-                onOpenSettings = { openAppSettings() }
+                onOpenSettings = { openAppSettings() },
+                isTrackingEnabled = isTrackingEnabled,
+                onTrackingToggle = { toggleTracking() }
             )
         }
 
         checkPermissionsAndStart()
     }
 
-    // New function to handle interval updates
     private fun updateInterval(newInterval: Long) {
         _intervalMs = newInterval
         locationManager.setInterval(newInterval)
@@ -204,18 +206,27 @@ class MainActivity : ComponentActivity() {
         super.onPause()
         locationManager.stopLocationUpdates()
     }
+
+    private fun toggleTracking() {
+        isTrackingEnabled = !isTrackingEnabled
+        if (isTrackingEnabled) {
+            locationManager.startLocationUpdates()
+        } else {
+            locationManager.stopLocationUpdates()
+        }
+    }
 }
 
 // ---------- 💞 UI COMPOSABLE 💞 ---------- //
 @Composable
-fun AppContent(state: UiState, intervalMs: Long, onIntervalChanged: (Long) -> Unit, onRetry: () -> Unit, onOpenSettings: (() -> Unit)? = null) {
+fun AppContent(state: UiState, intervalMs: Long, onIntervalChanged: (Long) -> Unit, onRetry: () -> Unit, onOpenSettings: (() -> Unit)? = null, isTrackingEnabled: Boolean, onTrackingToggle: () -> Unit) {
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
             when (state) {
                 is UiState.Loading -> LoadingScreen()
                 is UiState.RequestingPermissions -> LoadingScreen(title = "Requesting Permissions...", subtitle = "Please grant location access to continue.")
                 is UiState.RequestingLocationSettings -> LoadingScreen(title = "Checking Location Settings...", subtitle = "Ensuring GPS and location services are enabled.")
-                is UiState.Ready -> MainScreen(locationData = state.locationData, intervalMs = intervalMs, onIntervalChanged = onIntervalChanged)
+                is UiState.Ready -> MainScreen(locationData = state.locationData, intervalMs = intervalMs, onIntervalChanged = onIntervalChanged, isTrackingEnabled = isTrackingEnabled, onTrackingToggle = onTrackingToggle)
                 is UiState.Error -> ErrorScreen(message = state.message, onRetry = onRetry)
                 is UiState.ErrorNeedsSettings -> ErrorScreen(message = state.message, onRetry = onRetry, onOpenSettings = onOpenSettings)
             }
@@ -268,7 +279,7 @@ fun LoadingScreen(
 
 // Main screen
 @Composable
-fun MainScreen(locationData: LocationData?, intervalMs: Long, onIntervalChanged: (Long) -> Unit) {
+fun MainScreen(locationData: LocationData?, intervalMs: Long, onIntervalChanged: (Long) -> Unit, isTrackingEnabled: Boolean, onTrackingToggle: () -> Unit) {
     MaterialTheme {
         Column(
             modifier = Modifier
@@ -309,6 +320,13 @@ fun MainScreen(locationData: LocationData?, intervalMs: Long, onIntervalChanged:
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 8.dp)
             )
+
+            Button(
+                onClick = onTrackingToggle,
+                modifier = Modifier.padding(top = 8.dp)
+            ) {
+                Text(if (isTrackingEnabled) "Stop Tracking" else "Start Tracking")
+            }
         }
     }
 }
