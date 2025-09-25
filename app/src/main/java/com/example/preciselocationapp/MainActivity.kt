@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -17,192 +16,87 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.Slider
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import com.google.android.gms.common.api.ResolvableApiException
-import com.google.android.gms.location.*
+import com.google.android.gms.location.LocationSettingsResponse
+import com.google.android.gms.location.LocationSettingsStatusCodes
+import androidx.activity.result.IntentSenderRequest
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 
-/**
- * MainActivity handles location updates and displays them using a Compose UI.
- * It requests location permissions, manages location update intervals via a slider,
- * and shows the current latitude, longitude, accuracy, and update interval on screen.
- */
 class MainActivity : ComponentActivity() {
+    private lateinit var locationManager: LocationManager
+    private var _intervalMs by mutableLongStateOf(1000L)
 
-    // Fused location client for getting GPS/location updates.
-    private lateinit var fused: FusedLocationProviderClient
+    private val uiState = mutableStateOf<UiState>(UiState.Loading)
 
-    // Client to check device location settings (e.g., if GPS is enabled).
-    private lateinit var settingsClient: SettingsClient
-
-    // Callback to receive location updates from the FusedLocationProviderClient.
-    private lateinit var locationCallback: LocationCallback
-
-    // State variables to store the latest location details for the UI.
-    private var _latitude by mutableStateOf<Double?>(null)   // Latest latitude
-    private var _longitude by mutableStateOf<Double?>(null)  // Latest longitude
-    private var _accuracy by mutableStateOf<Float?>(null)    // Latest accuracy in meters
-    private var _lastFixTime by mutableStateOf<Long?>(null)  // Timestamp of last location fix
-
-    // The desired interval for location updates (in milliseconds). Default is 1000ms = 1 second.
-    private var _intervalMs by mutableLongStateOf(1000L) // update interval in ms
-
-    // LocationRequest instance used to configure the update interval and accuracy.
-    // This will be recreated when the interval changes.
-    private var locationRequest: LocationRequest = newLocationRequest(_intervalMs)
-
-    // Launcher to request location permissions from the user.
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { perms ->
-        // Callback after permission dialog: check if fine/coarse permission was granted.
         val fine = perms[Manifest.permission.ACCESS_FINE_LOCATION] == true
         val coarse = perms[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         if (fine || coarse) {
-            // If either permission is granted, start location updates.
-            startLocationUpdatesIfPermitted()
+            checkLocationSettings()
+        } else {
+            uiState.value = UiState.Error("Location permission denied. App needs location to work.")
         }
     }
 
-    // Launcher to prompt the user to change location settings if needed (e.g., enable GPS).
     private val locationSettingsLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
-    ) {
-        // If the user agrees to change settings, attempt to start updates again.
-        if (it.resultCode == RESULT_OK) {
-            startLocationUpdatesIfPermitted()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            locationManager.startLocationUpdates()
+            uiState.value = UiState.Ready(locationManager.locationData.value)
+        } else {
+            uiState.value = UiState.Error("Location settings could not be enabled.")
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState) // Initialize the activity.
+        super.onCreate(savedInstanceState)
+        locationManager = LocationManager(this)
 
-        // Initialize the fused location provider and settings client.
-        fused = LocationServices.getFusedLocationProviderClient(this)
-        settingsClient = LocationServices.getSettingsClient(this)
-
-        // Define the callback that processes incoming location updates.
-        locationCallback = object : LocationCallback() {
-            override fun onLocationResult(result: LocationResult) {
-                // This is called when a new location is available.
-                val loc = result.lastLocation ?: return
-                _latitude = loc.latitude
-                _longitude = loc.longitude
-                _accuracy = loc.accuracy
-                _lastFixTime = loc.time
-            }
-        }
-
-        // Set up the Compose UI content.
         setContent {
-            // Read the latest state values for use in the Compose UI.
-            val lat = _latitude
-            val lng = _longitude
-            val acc = _accuracy
-            val time = _lastFixTime
-
-            // Slider state to adjust the update interval in the UI.
-            var sliderValue by remember { mutableFloatStateOf(_intervalMs.toFloat()) }
-
-            // React to changes in the slider (update interval changes).
-            LaunchedEffect(sliderValue) {
-                // Convert the slider (Float) to Long, with a minimum of 200 ms.
-                val newMs = sliderValue.toLong().coerceAtLeast(200L)
-                if (newMs != _intervalMs) {
-                    _intervalMs = newMs
-                    updateLocationRequest(newMs)
-                    if (hasLocationPermission()) {
-                        // Restart location updates with the new interval.
-                        restartLocationUpdates()
-                    }
-                }
-            }
-
-            // Build the UI layout.
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Top),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        // Title text.
-                        Text(
-                            text = "Precise Location (Compose)",
-                            style = MaterialTheme.typography.titleLarge,
-                            textAlign = TextAlign.Center
-                        )
-                        // Display latitude and longitude, or "--" if not yet available.
-                        Text(
-                            text = "Lat: ${lat?.toString() ?: "--"}, Lng: ${lng?.toString() ?: "--"}",
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        // Display accuracy, formatted to one decimal, or "--" if not available.
-                        Text(
-                            text = "Accuracy: ${acc?.let { "%.1f m".format(it) } ?: "--"}",
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        // Display the current update interval in milliseconds.
-                        Text(
-                            text = "Interval: $_intervalMs ms",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        // Slider to adjust the location update interval (200 ms to 5000 ms).
-                        Slider(
-                            value = sliderValue,
-                            onValueChange = { sliderValue = it },
-                            valueRange = 200f..5000f,
-                            steps = 9,
-                            modifier = Modifier.padding(horizontal = 8.dp)
-                        )
-                        // Tip/instruction text.
-                        Text(
-                            text = "Tip: move the slider to choose update frequency (200 ms -> 5 s)",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                    }
-                }
-            }
+            AppContent(
+                uiState.value,
+                intervalMs = _intervalMs,
+                onIntervalChanged = ::updateInterval,
+                onRetry = { checkPermissionsAndStart() } // retry callback
+            )
         }
 
-        // After setting up the UI, check permissions and start location updates if allowed.
         checkPermissionsAndStart()
     }
 
-    /**
-     * Checks if the app has fine or coarse location permission.
-     * @return true if ACCESS_FINE_LOCATION or ACCESS_COARSE_LOCATION is granted.
-     */
+    // New function to handle interval updates
+    private fun updateInterval(newInterval: Long) {
+        _intervalMs = newInterval
+        locationManager.setInterval(newInterval)
+    }
+
     private fun hasLocationPermission(): Boolean {
-        val fine = ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
-                PackageManager.PERMISSION_GRANTED
-        val coarse = ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
-                PackageManager.PERMISSION_GRANTED
+        val fine = ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         return fine || coarse
     }
 
-    /**
-     * Requests location permissions if not already granted, otherwise starts location updates.
-     */
     private fun checkPermissionsAndStart() {
         if (hasLocationPermission()) {
-            // Permissions already granted, start receiving updates.
-            startLocationUpdatesIfPermitted()
+            checkLocationSettings()
         } else {
-            // Ask the user for fine and coarse location permissions.
+            uiState.value = UiState.RequestingPermissions
             permissionLauncher.launch(
                 arrayOf(
                     Manifest.permission.ACCESS_FINE_LOCATION,
@@ -212,88 +106,194 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Creates a new LocationRequest with the given interval in milliseconds.
-     * Uses high accuracy priority and sets the min and max update intervals.
-     */
-    private fun newLocationRequest(intervalMs: Long): LocationRequest {
-        return LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMs)
-            .setMinUpdateIntervalMillis(intervalMs / 2)  // at least half interval for updates
-            .setMaxUpdateDelayMillis(intervalMs)         // allow delay up to the full interval
-            .build()
-    }
+    @SuppressLint("MissingPermission")
+    private fun checkLocationSettings() {
+        uiState.value = UiState.RequestingLocationSettings
 
-    /**
-     * Updates the existing LocationRequest to use a new update interval.
-     * @param intervalMs The new update interval in milliseconds.
-     */
-    private fun updateLocationRequest(intervalMs: Long) {
-        locationRequest = newLocationRequest(intervalMs)
-    }
-
-    /**
-     * Starts receiving location updates if permissions are granted and settings allow it.
-     */
-    @SuppressLint("MissingPermission") // We only call this if we have permission.
-    private fun startLocationUpdatesIfPermitted() {
-        if (!hasLocationPermission()) return
-
-        // Build a request to check if the device's location settings are satisfied.
-        val settingsRequest = LocationSettingsRequest.Builder()
-            .addLocationRequest(locationRequest)
-            .build()
-
-        settingsClient.checkLocationSettings(settingsRequest)
-            .addOnSuccessListener {
-                // All location settings are satisfied. Request location updates.
-                fused.requestLocationUpdates(
-                    locationRequest,
-                    locationCallback,
-                    Looper.getMainLooper()
-                )
-            }
-            .addOnFailureListener { ex ->
-                if (ex is ResolvableApiException) {
-                    // Location settings are not satisfied, but this can be fixed by showing the user a dialog.
-                    try {
-                        // In a full application, you could launch an intent to prompt the user:
-                        // ex.startResolutionForResult(this, REQUEST_CHECK_SETTINGS)
-                        // Here we would use `locationSettingsLauncher` to start the resolution.
-                    } catch (sendEx: IntentSender.SendIntentException) {
-                        // Failed to show the settings dialog or send the intent.
+        val task = locationManager.checkLocationSettings()
+        task.addOnSuccessListener { locationSettingsResponse: LocationSettingsResponse ->
+            locationManager.startLocationUpdates()
+            uiState.value = UiState.Ready(locationManager.locationData.value)
+        }.addOnFailureListener { ex ->
+            when (ex) {
+                is ResolvableApiException -> {
+                    val status = ex.status
+                    when (status.statusCode) {
+                        LocationSettingsStatusCodes.RESOLUTION_REQUIRED -> {
+                            try {
+                                val intentSenderRequest = IntentSenderRequest.Builder(ex.resolution).build()
+                                locationSettingsLauncher.launch(intentSenderRequest)
+                            } catch (_: IntentSender.SendIntentException) {
+                                uiState.value = UiState.Error("Failed to open location settings.")
+                            }
+                        }
+                        LocationSettingsStatusCodes.SETTINGS_CHANGE_UNAVAILABLE -> {
+                            uiState.value = UiState.Error("Location services cannot be enabled on this device.")
+                        }
+                        else -> {
+                            uiState.value = UiState.Error("Unknown location error: ${status.statusCode}")
+                        }
                     }
                 }
+                else -> {
+                    uiState.value = UiState.Error("Could not check location settings: ${ex.message}")
+                }
             }
-    }
-
-    /**
-     * Stops and then restarts location updates.
-     * Useful when the update interval has been changed.
-     */
-    private fun restartLocationUpdates() {
-        if (!hasLocationPermission()) return
-        // Remove existing updates and start fresh.
-        fused.removeLocationUpdates(locationCallback)
-        startLocationUpdatesIfPermitted()
-    }
-
-    /**
-     * Called when the activity comes to the foreground.
-     * Restarts location updates if permissions are still granted.
-     */
-    override fun onResume() {
-        super.onResume()
-        if (hasLocationPermission()) {
-            startLocationUpdatesIfPermitted()
         }
     }
 
-    /**
-     * Called when the activity goes to the background.
-     * Stops location updates to save battery.
-     */
+    override fun onResume() {
+        super.onResume()
+        if (uiState.value is UiState.Ready && hasLocationPermission()) {
+            checkLocationSettings()
+        }
+    }
+
     override fun onPause() {
         super.onPause()
-        fused.removeLocationUpdates(locationCallback)
+        locationManager.stopLocationUpdates()
+    }
+}
+
+// ---------- 💞 UI COMPOSABLE 💞 ---------- //
+@Composable
+fun AppContent(state: UiState, intervalMs: Long, onIntervalChanged: (Long) -> Unit, onRetry: () -> Unit) {
+    MaterialTheme {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            when (state) {
+                is UiState.Loading -> LoadingScreen()
+                is UiState.RequestingPermissions -> LoadingScreen(title = "Requesting Permissions...", subtitle = "Please grant location access to continue.")
+                is UiState.RequestingLocationSettings -> LoadingScreen(title = "Checking Location Settings...", subtitle = "Ensuring GPS and location services are enabled.")
+                is UiState.Ready -> MainScreen(
+                    locationData = state.locationData,
+                    intervalMs = intervalMs,
+                    onIntervalChanged = onIntervalChanged
+                )
+                is UiState.Error -> ErrorScreen(message = state.message, onRetry = onRetry)
+            }
+        }
+    }
+}
+
+// Loading Screen with animated Spinner
+@Composable
+fun LoadingScreen(
+    title: String = "Loading...",
+    subtitle: String = "Please wait..."
+) {
+    // Container for the upper third of the screen
+    Box(
+        modifier = Modifier
+            .fillMaxHeight(1f / 3)
+            .padding(top = 96.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // circular progress indicator
+            CircularProgressIndicator(
+                modifier = Modifier.size(64.dp),
+                color = MaterialTheme.colorScheme.primary,
+                strokeWidth = 4.dp
+            )
+
+            Text(
+                text = title,
+                style = MaterialTheme.typography.headlineSmall,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f)
+            )
+        }
+    }
+}
+
+
+// Main screen
+@Composable
+fun MainScreen(locationData: LocationData?, intervalMs: Long, onIntervalChanged: (Long) -> Unit) {
+    MaterialTheme {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Top),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Precise Location (Compose)",
+                style = MaterialTheme.typography.titleLarge,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = "Lat: ${locationData?.latitude?.toString() ?: "--"}, Lng: ${locationData?.longitude?.toString() ?: "--"}",
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Text(
+                text = "Accuracy: ${locationData?.accuracy?.let { "%.1f m".format(it) } ?: "--"}",
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Text(
+                text = "Interval: $intervalMs ms",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Slider(
+                value = intervalMs.toFloat(),
+                onValueChange = {
+                    val newMs = it.toLong().coerceAtLeast(200L)
+                    onIntervalChanged(newMs)
+                },
+                valueRange = 200f..5000f,
+                steps = 9,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
+            Text(
+                text = "Tip: move the slider to choose update frequency (200 ms → 5 s)",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+    }
+}
+
+// Error screen
+@Composable
+fun ErrorScreen(message: String, onRetry: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "Error",
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.error
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = message,
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        Button(
+            onClick = onRetry,
+            modifier = Modifier.padding(top = 16.dp)
+        ) {
+            Text("Retry Permission Request")
+        }
     }
 }
