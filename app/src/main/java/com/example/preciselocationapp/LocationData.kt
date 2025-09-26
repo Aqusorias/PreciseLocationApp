@@ -8,4 +8,5 @@ data class LocationData(
     val longitude: Double? = null,
     val accuracy: Float? = null,
     val lastFixTime: Long? = null,
+    val speed: Float? = null
 )
